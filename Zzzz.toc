@@ -1,0 +1,8 @@
+## Interface: 11200
+## Author: MMM
+## Version: 1.0
+## Title:|cff771155[综合]|r聊天频道固定
+## Notes: 选择哪个频道固定.
+ActionBars.lua
+ChatFrame.lua
+MiniMap.lua
