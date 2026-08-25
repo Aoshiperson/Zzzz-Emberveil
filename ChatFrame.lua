@@ -2,7 +2,7 @@
 -- Backdrop helpers
 -- =====================================================================
 
-local CHAT_FONT_SIZE = 13
+local CHAT_FONT_SIZE = 10
 
 -- Seamless backdrop for large surfaces (chat panels).
 -- UI-Tooltip-Background has a baked-in edge highlight, so tiling it across a
@@ -49,7 +49,7 @@ end
 
 local function PositionChatFrame()
   if not ChatFrame1 then
-    print("|cffff0000ChatFrame: ChatFrame1 not available|r")
+    DEFAULT_CHAT_FRAME:AddMessage("|cffff0000ChatFrame: ChatFrame1 not available|r")
     return
   end
   ChatFrame1:ClearAllPoints()
@@ -71,17 +71,16 @@ end
 
 local function ApplyChatFontSize()
   if not ChatFrame1 then
-    print("|cffff0000ChatFrame: ChatFrame1 not available|r")
+    DEFAULT_CHAT_FRAME:AddMessage("|cffff0000ChatFrame: ChatFrame1 not available|r")
     return
   end
-  local fontPath, _, fontFlags = ChatFrame1:GetFont()
-  ChatFrame1:SetFont(fontPath or STANDARD_TEXT_FONT, CHAT_FONT_SIZE, fontFlags)
+  ChatFrame1:SetFont("Fonts\\FRIZQT__.TTF", CHAT_FONT_SIZE)
+  SetChatWindowSize(1, CHAT_FONT_SIZE)
 end
-
 local function StyleDefaultChatFrame()
-  if not ChatFrame1 then 
-    print("|cffff0000ChatFrame: ChatFrame1 not initialized yet|r")
-    return 
+  if not ChatFrame1 then
+    DEFAULT_CHAT_FRAME:AddMessage("|cffff0000ChatFrame: ChatFrame1 not initialized yet|r")
+    return
   end
   PositionChatFrame()
   set_chat_backdrop(ChatFrame1)
@@ -96,18 +95,16 @@ end
 
 local events = CreateFrame("Frame")
 if events then
-  events:RegisterEvent("PLAYER_LOGIN")
-  
-  -- 使用闭包而不是依赖 self 参数
-  -- 这解决了某些环境中 self 为 nil 的问题
+  events:RegisterEvent("PLAYER_ENTERING_WORLD")
+
   events:SetScript("OnEvent", function()
     pcall(function()
-      events:UnregisterEvent("PLAYER_LOGIN")
+      events:UnregisterEvent("PLAYER_ENTERING_WORLD")
     end)
     pcall(StyleDefaultChatFrame)
   end)
-  
-  print("|cffff00ffChatFrame: Loaded successfully|r")
+
+  DEFAULT_CHAT_FRAME:AddMessage("|cffff00ffChatFrame: Loaded successfully|r")
 else
-  print("|cffff0000ChatFrame: Failed to create events frame|r")
+  DEFAULT_CHAT_FRAME:AddMessage("|cffff0000ChatFrame: Failed to create events frame|r")
 end

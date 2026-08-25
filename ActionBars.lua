@@ -1,10 +1,5 @@
 --[[
-  ActionBars.lua v3
-
-  修复：确保两行动作条都正确显示
-  - ActionButton 1-12（第一行）
-  - MultiBarBottomLeftButton 1-12（第二行）
-  - MultiBarBottomRightButton 1-12（右下角）
+  ActionBars.lua —— 独立版（从 PotatoUI 剥离，去除框架依赖）
 --]]
 
 -- ============================================================
@@ -19,38 +14,31 @@ local auxiliaryPanel = nil
 local xpBar = nil
 local actionPageEvents = nil
 local actionResolversInstalled = false
-local bagPanel = nil
-local bagEvents = nil
 
-local BUTTON_SIZE = 34
-local BUTTONS_PER_PAGE = 12
-local DEFAULT_ACTIONBAR_PAGES = 6
-
--- 需要隐藏的原生动作条元素：鹰头装饰、经验/声望/性能条、
--- 微章菜单等
-local HIDDEN_FRAME_NAMES = {
+local hiddenNames = {
+  -- gryphons and action-bar artwork
   "MainMenuBarLeftEndCap", "MainMenuBarRightEndCap",
   "MainMenuBarTexture0", "MainMenuBarTexture1",
   "MainMenuBarTexture2", "MainMenuBarTexture3",
   "MainMenuBarPageNumber", "MainMenuBarPageUpButton", "MainMenuBarPageDownButton",
 
+  -- experience, reputation and performance chrome
   "MainMenuExpBar", "ExhaustionTick", "MainMenuBarMaxLevelBar",
   "MainMenuBarOverlayFrame", "ReputationWatchBar",
   "MainMenuBarPerformanceBarFrame", "MainMenuBarPerformanceBar",
 
+  -- micro menu
   "CharacterMicroButton", "SpellbookMicroButton", "TalentMicroButton",
   "QuestLogMicroButton", "SocialsMicroButton", "WorldMapMicroButton",
   "MainMenuMicroButton", "HelpMicroButton",
-}
 
--- 背包按钮不永久隐藏：打开背包时显示在右下角，关闭时自动隐藏。
-local BAG_BUTTON_NAMES = {
+  -- original bag strip
   "MainMenuBarBackpackButton", "CharacterBag0Slot", "CharacterBag1Slot",
   "CharacterBag2Slot", "CharacterBag3Slot", "KeyRingButton",
 }
 
 -- ============================================================
--- 通用 UI 工具
+-- 通用 UI 工具（原来由 PotatoUI 核心提供，这里内联）
 -- ============================================================
 
 local function HideFrame(frame)
@@ -75,74 +63,43 @@ local function CreatePanel(name, parent, level)
   return panel
 end
 
-local function StyleActionButton(button)
-  if not button or button.ActionBarsStyled then return end
-  button.ActionBarsStyled = true
-  button:SetWidth(BUTTON_SIZE)
-  button:SetHeight(BUTTON_SIZE)
-
-  local normalTexture = button:GetNormalTexture()
-  if normalTexture then normalTexture:SetAlpha(0) end
-
-  local border = CreateFrame("Frame", nil, button)
-  border:SetPoint("TOPLEFT", button, "TOPLEFT", -2, 2)
-  border:SetPoint("BOTTOMRIGHT", button, "BOTTOMRIGHT", 2, -2)
-  border:SetFrameLevel(math.max(0, button:GetFrameLevel() - 1))
-  border:SetBackdrop({
-    bgFile = "Interface\\Buttons\\WHITE8X8",
-    edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
-    tile = true,
-    tileSize = 8,
-    edgeSize = 10,
-    insets = { left = 2, right = 2, top = 2, bottom = 2 },
-  })
-  border:SetBackdropColor(0.02, 0.025, 0.03, 0.96)
-  border:SetBackdropBorderColor(0.14, 0.18, 0.2, 1)
-  button.ActionBarsBorder = border
-end
-
-local function PlaceButton(button, panel, column, row)
-  if not button then return end
-  button:SetParent(panel)
-  button:ClearAllPoints()
-  button:SetPoint("BOTTOMLEFT", panel, "BOTTOMLEFT", 5 + (column - 1) * 36, 5 + row * 36)
-  StyleActionButton(button)
-  button:Show()
-end
-
 -- ============================================================
 -- 动作槽位解析
 -- ============================================================
+
+local StyleActionButton
 
 local function ResolvePrimaryAction(button)
   local buttonID = button and button:GetID()
   if not buttonID then return nil end
 
+  -- In Vanilla clients forms are stored after the six normal action pages.
+  -- Emberveil does not reliably update CURRENT_ACTIONBAR_PAGE after buttons
+  -- get reparented, so resolve the active bonus page directly.
   local bonusOffset = 0
   if type(GetBonusBarOffset) == "function" then
     bonusOffset = tonumber(GetBonusBarOffset()) or 0
   end
 
+  -- Emberveil can leave the bonus offset stuck briefly after a rogue breaks
+  -- stealth. The form state changes reliably, so do not keep routing clicks
+  -- to slots 73-84 once the rogue has returned to form zero.
   local _, class
-  if type(UnitClass) == "function" then
-    _, class = UnitClass("player")
-  end
+  if type(UnitClass) == "function" then _, class = UnitClass("player") end
   if class == "ROGUE" and bonusOffset > 0 and type(GetShapeshiftForm) == "function" then
     local ok, activeForm = pcall(GetShapeshiftForm)
     if ok and activeForm ~= nil and (tonumber(activeForm) or 0) == 0 then
       bonusOffset = 0
     end
   end
-
   if bonusOffset > 0 then
-    local normalPages = tonumber(NUM_ACTIONBAR_PAGES) or DEFAULT_ACTIONBAR_PAGES
-    return buttonID + (normalPages + bonusOffset - 1) * BUTTONS_PER_PAGE
+    local normalPages = tonumber(NUM_ACTIONBAR_PAGES) or 6
+    return buttonID + (normalPages + bonusOffset - 1) * 12
   end
 
-  local maxPages = tonumber(NUM_ACTIONBAR_PAGES) or DEFAULT_ACTIONBAR_PAGES
   local page = tonumber(CURRENT_ACTIONBAR_PAGE) or 1
-  if page < 1 or page > maxPages then page = 1 end
-  return buttonID + (page - 1) * BUTTONS_PER_PAGE
+  if page < 1 or page > (tonumber(NUM_ACTIONBAR_PAGES) or 6) then page = 1 end
+  return buttonID + (page - 1) * 12
 end
 
 -- ============================================================
@@ -153,31 +110,40 @@ local function InstallActionResolvers()
   if actionResolversInstalled then return end
   actionResolversInstalled = true
 
+  -- Emberveil currently resolves MultiBarBottomLeft buttons as slots 1-12,
+  -- duplicating the primary row. Honour our explicit slot mapping in both
+  -- resolver variants used by original 1.12 FrameXML.
   local originalActionResolver = ActionButton_GetPagedID
-  _G.ActionButton_GetPagedID = function(button)
-    if button and button.ActionBarsAction then
-      return button.ActionBarsAction
+  ActionButton_GetPagedID = function(button)
+    local activeButton = button or this
+    if activeButton and activeButton.ActionBarsAction then
+      return activeButton.ActionBarsAction
     end
-    if button and button.ActionBarsPrimaryAction then
-      return ResolvePrimaryAction(button)
+    if activeButton and activeButton.ActionBarsPrimaryAction then
+      return ResolvePrimaryAction(activeButton)
     end
     if originalActionResolver then return originalActionResolver(button) end
-    return button and button:GetID()
+    return activeButton and activeButton:GetID()
   end
 
   local originalMultiResolver = MultiActionButton_GetPagedID
-  _G.MultiActionButton_GetPagedID = function(button)
-    if button and button.ActionBarsAction then
-      return button.ActionBarsAction
+  MultiActionButton_GetPagedID = function(button)
+    local activeButton = button or this
+    if activeButton and activeButton.ActionBarsAction then
+      return activeButton.ActionBarsAction
     end
     if originalMultiResolver then return originalMultiResolver(button) end
-    return button and button:GetID()
+    return activeButton and activeButton:GetID()
   end
 
+  -- Vanilla key bindings normally divert to BonusActionButton while the
+  -- native bonus controller is shown. We keep that controller alive for
+  -- state updates but display ActionButton instead, so dispatch bindings
+  -- through the visible button and the same resolver used by mouse clicks.
   local originalActionButtonDown = ActionButtonDown
   if type(originalActionButtonDown) == "function" then
-    _G.ActionButtonDown = function(id)
-      local activeButton = _G["ActionButton" .. tostring(id or "")]
+    ActionButtonDown = function(id)
+      local activeButton = getglobal("ActionButton" .. tostring(id or ""))
       if not activeButton or not activeButton.ActionBarsPrimaryAction then
         return originalActionButtonDown(id)
       end
@@ -189,19 +155,16 @@ local function InstallActionResolvers()
 
   local originalActionButtonUp = ActionButtonUp
   if type(originalActionButtonUp) == "function" then
-    _G.ActionButtonUp = function(id, onSelf)
-      local activeButton = _G["ActionButton" .. tostring(id or "")]
+    ActionButtonUp = function(id, onSelf)
+      local activeButton = getglobal("ActionButton" .. tostring(id or ""))
       if not activeButton or not activeButton.ActionBarsPrimaryAction then
         return originalActionButtonUp(id, onSelf)
       end
       if activeButton:GetButtonState() ~= "PUSHED" then return end
       activeButton:SetButtonState("NORMAL")
       if MacroFrame_SaveMacro then MacroFrame_SaveMacro() end
-
       local action = ResolvePrimaryAction(activeButton)
-      if action and type(UseAction) == "function" then
-        UseAction(action, 0, onSelf)
-      end
+      if action and type(UseAction) == "function" then UseAction(action, 0, onSelf) end
       if action and type(IsCurrentAction) == "function" and IsCurrentAction(action) then
         activeButton:SetChecked(1)
       else
@@ -212,28 +175,42 @@ local function InstallActionResolvers()
 end
 
 local function RefreshActionButtons()
-  local function RefreshMultiButton(prefix, index)
-    local multiButton = _G[prefix .. index]
-    if not multiButton then return end
-    if type(MultiActionButton_Update) == "function" then
-      pcall(MultiActionButton_Update, multiButton)
-    elseif type(ActionButton_Update) == "function" then
-      pcall(ActionButton_Update, multiButton)
-    end
-  end
-
-  for i = 1, BUTTONS_PER_PAGE do
-    local button = _G["ActionButton" .. i]
+  local previousThis = this
+  local i
+  for i = 1, 12 do
+    local button = getglobal("ActionButton" .. i)
     if button then
+      -- Emberveil's input bridge may read this cached field directly instead
+      -- of calling ActionButton_GetPagedID. Keep it synchronized on every
+      -- page/form refresh so leaving stealth restores slots 1-12.
       button.action = ResolvePrimaryAction(button)
-      if type(ActionButton_Update) == "function" then pcall(ActionButton_Update, button) end
-      if type(ActionButton_UpdateUsable) == "function" then pcall(ActionButton_UpdateUsable, button) end
-      if type(ActionButton_UpdateCooldown) == "function" then pcall(ActionButton_UpdateCooldown, button) end
+      this = button
+      if type(ActionButton_Update) == "function" then pcall(ActionButton_Update) end
+      if type(ActionButton_UpdateUsable) == "function" then pcall(ActionButton_UpdateUsable) end
+      if type(ActionButton_UpdateCooldown) == "function" then pcall(ActionButton_UpdateCooldown) end
     end
 
-    RefreshMultiButton("MultiBarBottomLeftButton", i)
-    RefreshMultiButton("MultiBarBottomRightButton", i)
+    local bottomLeftButton = getglobal("MultiBarBottomLeftButton" .. i)
+    if bottomLeftButton then
+      this = bottomLeftButton
+      if type(MultiActionButton_Update) == "function" then
+        pcall(MultiActionButton_Update)
+      elseif type(ActionButton_Update) == "function" then
+        pcall(ActionButton_Update)
+      end
+    end
+
+    local bottomRightButton = getglobal("MultiBarBottomRightButton" .. i)
+    if bottomRightButton then
+      this = bottomRightButton
+      if type(MultiActionButton_Update) == "function" then
+        pcall(MultiActionButton_Update)
+      elseif type(ActionButton_Update) == "function" then
+        pcall(ActionButton_Update)
+      end
+    end
   end
+  this = previousThis
 end
 
 -- ============================================================
@@ -242,26 +219,24 @@ end
 
 local function PositionAuxiliaryBars()
   if not auxiliaryPanel then
-    local panel = CreateFrame("Frame", nil, UIParent)
+    local panel = CreateFrame("Frame", "ActionBarsAuxiliaryPanel", UIParent)
     panel:SetWidth(362)
     panel:SetHeight(38)
+    panel:SetPoint("BOTTOMLEFT", UIParent, "BOTTOMLEFT", 18, 18)
     panel:SetFrameStrata("MEDIUM")
     panel:SetFrameLevel(4)
-
-    local halfwayToRightEdge = (UIParent:GetWidth() or 1024) / 4
-    panel:SetPoint("BOTTOM", UIParent, "BOTTOM", halfwayToRightEdge, 18)
-
     auxiliaryPanel = panel
   end
   local panel = auxiliaryPanel
 
   local function PlaceAuxiliaryButtons(prefix, visibleCount, row)
+    local i
     for i = 1, 10 do
-      local button = _G[prefix .. i]
+      local button = getglobal(prefix .. i)
       if button then
         button:SetParent(panel)
-        button:SetWidth(BUTTON_SIZE)
-        button:SetHeight(BUTTON_SIZE)
+        button:SetWidth(34)
+        button:SetHeight(34)
         button:ClearAllPoints()
         button:SetPoint("BOTTOMLEFT", panel, "BOTTOMLEFT", 2 + (i - 1) * 36, 2 + row * 36)
         StyleActionButton(button)
@@ -280,7 +255,7 @@ local function PositionAuxiliaryBars()
     PlaceAuxiliaryButtons("ShapeshiftButton", formCount, 0)
   end
 
-  local hasPet = false
+  local hasPet
   if type(HasPetUI) == "function" then
     local petUI = HasPetUI()
     hasPet = petUI == true or petUI == 1 or petUI == "1"
@@ -294,7 +269,6 @@ local function PositionAuxiliaryBars()
     PetActionBarFrame:EnableMouse(false)
     PlaceAuxiliaryButtons("PetActionButton", hasPet and 10 or 0, formCount > 0 and 1 or 0)
   end
-
   local panelHeight = (hasPet and formCount > 0) and 74 or 38
   panel:SetWidth(362)
   panel:SetHeight(panelHeight)
@@ -302,133 +276,86 @@ end
 
 local function SetupActionPageEvents()
   if actionPageEvents then return end
+  local events = CreateFrame("Frame", "ActionBarsPageEvents")
+  -- Some Emberveil builds expose a slightly different subset of the old
+  -- FrameXML events. Register each defensively so one absent alias cannot
+  -- prevent this addon from loading.
+  pcall(events.RegisterEvent, events, "UPDATE_BONUS_ACTIONBAR")
+  pcall(events.RegisterEvent, events, "ACTIONBAR_PAGE_CHANGED")
+  pcall(events.RegisterEvent, events, "UPDATE_SHAPESHIFT_FORM")
+  pcall(events.RegisterEvent, events, "UPDATE_SHAPESHIFT_FORMS")
+  pcall(events.RegisterEvent, events, "PLAYER_AURAS_CHANGED")
+  pcall(events.RegisterEvent, events, "PLAYER_ENTER_COMBAT")
+  pcall(events.RegisterEvent, events, "PLAYER_LEAVE_COMBAT")
+  pcall(events.RegisterEvent, events, "ACTIONBAR_SLOT_CHANGED")
+  pcall(events.RegisterEvent, events, "PET_BAR_UPDATE")
+  pcall(events.RegisterEvent, events, "UNIT_PET")
 
-  local events = CreateFrame("Frame", nil)
-
-  local EVENT_NAMES = {
-    "UPDATE_BONUS_ACTIONBAR", "ACTIONBAR_PAGE_CHANGED",
-    "UPDATE_SHAPESHIFT_FORM", "UPDATE_SHAPESHIFT_FORMS",
-    "PLAYER_AURAS_CHANGED", "PLAYER_ENTER_COMBAT", "PLAYER_LEAVE_COMBAT",
-    "ACTIONBAR_SLOT_CHANGED", "PET_BAR_UPDATE", "UNIT_PET",
-  }
-  for _, eventName in ipairs(EVENT_NAMES) do
-    pcall(events.RegisterEvent, events, eventName)
-  end
-
-  local REFRESH_WINDOW = 0.75
-  local REFRESH_INTERVAL = 0.05
-
-  local function OnUpdateDuringTransition(frame, elapsed)
-    frame.refreshElapsed = (frame.refreshElapsed or 0) + (elapsed or 0)
-    frame.refreshRemaining = (frame.refreshRemaining or 0) - (elapsed or 0)
-    if frame.refreshElapsed >= REFRESH_INTERVAL or frame.refreshRemaining <= 0 then
-      frame.refreshElapsed = 0
+  local function RefreshAfterClientUpdate()
+    this.refreshElapsed = (this.refreshElapsed or 0) + (arg1 or 0)
+    this.refreshRemaining = (this.refreshRemaining or 0) - (arg1 or 0)
+    if this.refreshElapsed >= .05 or this.refreshRemaining <= 0 then
+      this.refreshElapsed = 0
       RefreshActionButtons()
       PositionAuxiliaryBars()
     end
-    if frame.refreshRemaining <= 0 then
-      frame:SetScript("OnUpdate", nil)
-    end
+    if this.refreshRemaining <= 0 then this:SetScript("OnUpdate", nil) end
   end
-
   events:SetScript("OnEvent", function()
+    -- Refresh throughout the short native bonus-bar transition. Emberveil can
+    -- publish the aura/form, bonus offset and cached action ID on different
+    -- frames when stealth ends through an attack.
     RefreshActionButtons()
     PositionAuxiliaryBars()
-    events.refreshElapsed = 0
-    events.refreshRemaining = REFRESH_WINDOW
-    events:SetScript("OnUpdate", OnUpdateDuringTransition)
+    this.refreshElapsed = 0
+    this.refreshRemaining = .75
+    this:SetScript("OnUpdate", RefreshAfterClientUpdate)
   end)
-
   actionPageEvents = events
 end
 
 -- ============================================================
--- 背包按钮（打开背包时显示在右下角，关闭时隐藏）
+-- 按钮样式与摆放
 -- ============================================================
 
-local function IsAnyContainerFrameShown()
-  local frameCount = tonumber(NUM_CONTAINER_FRAMES) or 13
-  for i = 1, frameCount do
-    local frame = _G["ContainerFrame" .. i]
-    if frame and frame:IsShown() then
-      return true
-    end
-  end
-  return false
+StyleActionButton = function(button)
+  if not button or button.ActionBarsStyled then return end
+  button.ActionBarsStyled = true
+  button:SetWidth(34)
+  button:SetHeight(34)
+
+  local normal = button:GetNormalTexture()
+  if normal then normal:SetAlpha(0) end
+
+  local border = CreateFrame("Frame", nil, button)
+  border:SetPoint("TOPLEFT", button, "TOPLEFT", -2, 2)
+  border:SetPoint("BOTTOMRIGHT", button, "BOTTOMRIGHT", 2, -2)
+  border:SetFrameLevel(math.max(0, button:GetFrameLevel() - 1))
+  border:SetBackdrop({
+    bgFile = "Interface\\Buttons\\WHITE8X8",
+    edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+    tile = true,
+    tileSize = 8,
+    edgeSize = 10,
+    insets = { left = 2, right = 2, top = 2, bottom = 2 },
+  })
+  border:SetBackdropColor(.02, .025, .03, .96)
+  border:SetBackdropBorderColor(.14, .18, .2, 1)
+  button.ActionBarsBorder = border
 end
 
-local function UpdateBagPanelVisibility()
-  if not bagPanel then return end
-  if IsAnyContainerFrameShown() then
-    bagPanel:Show()
-  else
-    bagPanel:Hide()
-  end
-end
-
-local function PositionBagButtons()
-  if not bagPanel then
-    local panel = CreateFrame("Frame", nil, UIParent)
-    panel:SetFrameStrata("MEDIUM")
-    panel:SetFrameLevel(4)
-    panel:SetPoint("BOTTOMRIGHT", UIParent, "BOTTOMRIGHT", -14, 66)
-    bagPanel = panel
-
-    local column = 0
-    for _, name in ipairs(BAG_BUTTON_NAMES) do
-      local button = _G[name]
-      if button then
-        button:SetParent(panel)
-        button:ClearAllPoints()
-        button:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", -column * 32, 0)
-        button:Show()
-        column = column + 1
-      end
-    end
-    panel:SetWidth(math.max(1, column * 32))
-    panel:SetHeight(32)
-  end
-
-  UpdateBagPanelVisibility()
-end
-
-local function SetupBagEvents()
-  if bagEvents then return end
-
-  local events = CreateFrame("Frame", nil)
-  events:RegisterEvent("BAG_OPEN")
-  events:RegisterEvent("BAG_CLOSED")
-  events:RegisterEvent("PLAYER_ENTERING_WORLD")
-  
-  events:SetScript("OnEvent", function()
-    UpdateBagPanelVisibility()
-  end)
-
-  bagEvents = events
+local function PlaceButton(button, panel, column, row)
+  if not button then return end
+  button:SetParent(panel)
+  button:ClearAllPoints()
+  button:SetPoint("BOTTOMLEFT", panel, "BOTTOMLEFT", 5 + (column - 1) * 36, 5 + row * 36)
+  StyleActionButton(button)
+  button:Show()
 end
 
 -- ============================================================
 -- 经验条
 -- ============================================================
-
-local function FormatXPText(level, percent, resting, rested)
-  local text = "Level " .. level
-  if percent then
-    text = text .. "  -  " .. percent .. "%"
-  else
-    text = text .. "  -  Maximum Level"
-  end
-
-  if resting and rested and rested > 0 then
-    text = text .. "  |cff66aaffResting  -  Rested " .. rested .. "|r"
-  elseif resting then
-    text = text .. "  |cff66aaffResting|r"
-  elseif rested and rested > 0 then
-    text = text .. "  |cff66aaffRested " .. rested .. "|r"
-  end
-
-  return text
-end
 
 local function UpdateXPBar()
   local bar = xpBar
@@ -437,35 +364,43 @@ local function UpdateXPBar()
   local current = UnitXP("player") or 0
   local maximum = UnitXPMax("player") or 0
   local level = UnitLevel("player") or 0
-
   local rested = 0
-  if type(GetXPExhaustion) == "function" then
-    rested = GetXPExhaustion() or 0
-  end
-
-  local resting = false
+  if type(GetXPExhaustion) == "function" then rested = GetXPExhaustion() or 0 end
+  local resting
   if type(IsResting) == "function" then
     local ok, value = pcall(IsResting)
     resting = ok and (value == true or value == 1 or value == "1")
   end
 
   if resting then
-    bar:SetStatusBarColor(0.18, 0.48, 0.92)
-    bar:SetBackdropBorderColor(0.35, 0.62, 1, 1)
+    bar:SetStatusBarColor(.18, .48, .92)
+    bar:SetBackdropBorderColor(.35, .62, 1, 1)
   else
-    bar:SetStatusBarColor(0.38, 0.28, 0.78)
-    bar:SetBackdropBorderColor(0.18, 0.22, 0.28, 1)
+    bar:SetStatusBarColor(.38, .28, .78)
+    bar:SetBackdropBorderColor(.18, .22, .28, 1)
   end
 
   if maximum > 0 then
     local percent = math.floor(current / maximum * 100)
     bar:SetMinMaxValues(0, maximum)
     bar:SetValue(current)
-    bar.text:SetText(FormatXPText(level, percent, resting, rested))
+    if resting and rested > 0 then
+      bar.text:SetText("Level " .. level .. "  -  " .. percent .. "%  |cff66aaffResting  -  Rested " .. rested .. "|r")
+    elseif resting then
+      bar.text:SetText("Level " .. level .. "  -  " .. percent .. "%  |cff66aaffResting|r")
+    elseif rested > 0 then
+      bar.text:SetText("Level " .. level .. "  -  " .. percent .. "%  |cff66aaffRested " .. rested .. "|r")
+    else
+      bar.text:SetText("Level " .. level .. "  -  " .. percent .. "%")
+    end
   else
     bar:SetMinMaxValues(0, 1)
     bar:SetValue(1)
-    bar.text:SetText(FormatXPText(level, nil, resting, rested))
+    if resting then
+      bar.text:SetText("Level " .. level .. "  -  Maximum Level  |cff66aaffResting|r")
+    else
+      bar.text:SetText("Level " .. level .. "  -  Maximum Level")
+    end
   end
 
   bar.current = current
@@ -478,7 +413,7 @@ local function SetupXPBar()
   if xpBar then return end
 
   local parent = actionPanel or UIParent
-  local bar = CreateFrame("StatusBar", nil, parent)
+  local bar = CreateFrame("StatusBar", "ActionBarsXPBar", parent)
   bar:SetWidth(442)
   bar:SetHeight(12)
   if actionPanel then
@@ -487,7 +422,7 @@ local function SetupXPBar()
     bar:SetPoint("BOTTOM", UIParent, "BOTTOM", 0, 18)
   end
   bar:SetStatusBarTexture(statusbarTexture)
-  bar:SetStatusBarColor(0.38, 0.28, 0.78)
+  bar:SetStatusBarColor(.38, .28, .78)
   bar:SetFrameLevel((parent:GetFrameLevel() or 1) + 3)
   bar:SetBackdrop({
     bgFile = "Interface\\Buttons\\WHITE8X8",
@@ -497,46 +432,41 @@ local function SetupXPBar()
     edgeSize = 8,
     insets = { left = 2, right = 2, top = 2, bottom = 2 },
   })
-  bar:SetBackdropColor(0.025, 0.03, 0.04, 0.8)
-  bar:SetBackdropBorderColor(0.18, 0.22, 0.28, 1)
+  bar:SetBackdropColor(.025, .03, .04, .8)
+  bar:SetBackdropBorderColor(.18, .22, .28, 1)
 
   bar.background = bar:CreateTexture(nil, "BACKGROUND")
   bar.background:SetAllPoints()
   bar.background:SetTexture(statusbarTexture)
-  bar.background:SetVertexColor(0.035, 0.04, 0.055, 0.9)
+  bar.background:SetVertexColor(.035, .04, .055, .9)
 
   bar.text = bar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
   bar.text:SetPoint("CENTER", bar, "CENTER", 0, 0)
 
   bar:EnableMouse(true)
-  bar:SetScript("OnEnter", function(frame)
-    GameTooltip:SetOwner(frame, "ANCHOR_TOP")
+  bar:SetScript("OnEnter", function()
+    GameTooltip:SetOwner(this, "ANCHOR_TOP")
     GameTooltip:SetText("Experience")
-    if frame.maximum and frame.maximum > 0 then
-      GameTooltip:AddLine(frame.current .. " / " .. frame.maximum, 1, 1, 1)
-      if frame.rested and frame.rested > 0 then
-        GameTooltip:AddLine("Rested: " .. frame.rested, 0.4, 0.65, 1)
+    if this.maximum and this.maximum > 0 then
+      GameTooltip:AddLine(this.current .. " / " .. this.maximum, 1, 1, 1)
+      if this.rested and this.rested > 0 then
+        GameTooltip:AddLine("Rested: " .. this.rested, .4, .65, 1)
       end
     else
-      GameTooltip:AddLine("Maximum level", 1, 0.82, 0.2)
+      GameTooltip:AddLine("Maximum level", 1, .82, .2)
     end
-    if frame.resting then
-      GameTooltip:AddLine("Currently resting", 0.4, 0.65, 1)
-    end
+    if this.resting then GameTooltip:AddLine("Currently resting", .4, .65, 1) end
     GameTooltip:Show()
   end)
   bar:SetScript("OnLeave", function() GameTooltip:Hide() end)
 
-  local events = CreateFrame("Frame", nil)
+  local events = CreateFrame("Frame", "ActionBarsXPEvents")
   events:RegisterEvent("PLAYER_XP_UPDATE")
   events:RegisterEvent("UPDATE_EXHAUSTION")
   events:RegisterEvent("PLAYER_LEVEL_UP")
   events:RegisterEvent("PLAYER_ENTERING_WORLD")
   pcall(events.RegisterEvent, events, "PLAYER_UPDATE_RESTING")
-  
-  events:SetScript("OnEvent", function()
-    UpdateXPBar()
-  end)
+  events:SetScript("OnEvent", UpdateXPBar)
 
   xpBar = bar
   UpdateXPBar()
@@ -549,11 +479,11 @@ end
 local function SetupActionBars()
   InstallActionResolvers()
 
-  for _, name in ipairs(HIDDEN_FRAME_NAMES) do
-    HideFrame(_G[name])
+  for _, name in ipairs(hiddenNames) do
+    HideFrame(getglobal(name))
   end
 
-  local panel = CreatePanel(nil, UIParent, 1)
+  local panel = CreatePanel("ActionBarsActionPanel", UIParent, 1)
   panel:SetWidth(442)
   panel:SetHeight(82)
   panel:SetPoint("BOTTOM", UIParent, "BOTTOM", 0, 18)
@@ -561,7 +491,10 @@ local function SetupActionBars()
   panel:SetBackdropBorderColor(0, 0, 0, 0)
   actionPanel = panel
 
-  local utilityPanel = CreatePanel(nil, UIParent, 1)
+  -- Emberveil leaves the second multi-action row partially off-screen when
+  -- its original bar geometry is active. Give slots 49-60 a compact panel
+  -- of their own at bottom-right instead.
+  local utilityPanel = CreatePanel("ActionBarsUtilityActionPanel", UIParent, 1)
   utilityPanel:SetWidth(442)
   utilityPanel:SetHeight(44)
   utilityPanel:SetPoint("BOTTOMRIGHT", UIParent, "BOTTOMRIGHT", -14, 14)
@@ -569,28 +502,20 @@ local function SetupActionBars()
   utilityPanel:SetBackdropBorderColor(0, 0, 0, 0)
   utilityActionPanel = utilityPanel
 
-  -- 第一行：ActionButton 1-12 （主动作条）
-  for i = 1, BUTTONS_PER_PAGE do
-    local primaryButton = _G["ActionButton" .. i]
-    if primaryButton then
-      primaryButton.ActionBarsPrimaryAction = true
-    end
+  local i
+  for i = 1, 12 do
+    local primaryButton = getglobal("ActionButton" .. i)
+    if primaryButton then primaryButton.ActionBarsPrimaryAction = true end
     PlaceButton(primaryButton, panel, i, 0)
-  end
 
-  -- 第二行：MultiBarBottomLeftButton 1-12 （上层按钮）
-  for i = 1, BUTTONS_PER_PAGE do
-    local upperButton = _G["MultiBarBottomLeftButton" .. i]
+    local upperButton = getglobal("MultiBarBottomLeftButton" .. i)
     if upperButton then
       upperButton.ActionBarsAction = 60 + i
       upperButton.action = 60 + i
     end
     PlaceButton(upperButton, panel, i, 1)
-  end
 
-  -- 右下角：MultiBarBottomRightButton 1-12 （实用按钮）
-  for i = 1, BUTTONS_PER_PAGE do
-    local utilityButton = _G["MultiBarBottomRightButton" .. i]
+    local utilityButton = getglobal("MultiBarBottomRightButton" .. i)
     if utilityButton then
       utilityButton.ActionBarsAction = 48 + i
       utilityButton.action = 48 + i
@@ -601,15 +526,20 @@ local function SetupActionBars()
   SetupActionPageEvents()
   RefreshActionButtons()
 
-  -- 隐藏原生动作条框架（但不影响已重新父级化的按钮）
+  -- The buttons now belong directly to this panel. Hide their old containers
+  -- so Emberveil cannot draw a second native copy at the bottom of the screen.
   HideFrame(MainMenuBarArtFrame)
   HideFrame(MainMenuBar)
-  -- 注：MultiBarBottomLeft 和 MultiBarBottomRight 的按钮已被重新父级化
-  -- 所以隐藏这些框架不会影响按钮显示
+  if MultiBarBottomLeft then
+    HideFrame(MultiBarBottomLeft)
+  end
+  if MultiBarBottomRight then
+    HideFrame(MultiBarBottomRight)
+  end
 
+  -- Keep only the useful stance/form and pet buttons at bottom-left; the
+  -- original controller frames remain invisible so their update code works.
   PositionAuxiliaryBars()
-  PositionBagButtons()
-  SetupBagEvents()
 end
 
 -- ============================================================
@@ -618,17 +548,13 @@ end
 
 local bootstrap = CreateFrame("Frame", nil, UIParent)
 if bootstrap then
-  bootstrap:RegisterEvent("PLAYER_LOGIN")
-  
+  bootstrap:RegisterEvent("PLAYER_ENTERING_WORLD")
   bootstrap:SetScript("OnEvent", function()
-    pcall(function()
-      bootstrap:UnregisterEvent("PLAYER_LOGIN")
-    end)
+    pcall(function() bootstrap:UnregisterEvent("PLAYER_ENTERING_WORLD") end)
     pcall(SetupActionBars)
     pcall(SetupXPBar)
   end)
-  
-  print("|cffff00ffActionBars v3: Loaded successfully|r")
+  DEFAULT_CHAT_FRAME:AddMessage("|cffff00ffActionBars: Loaded successfully|r")
 else
-  print("|cffff0000ActionBars: Failed to create bootstrap frame|r")
+  DEFAULT_CHAT_FRAME:AddMessage("|cffff0000ActionBars: Failed to create bootstrap frame|r")
 end
