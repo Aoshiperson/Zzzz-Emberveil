@@ -1,8 +1,9 @@
 ## Interface: 11200
-## Author: MMM
-## Version: 1.0
-## Title:|cff771155[综合]|r聊天频道固定
-## Notes: 选择哪个频道固定.
+## Title: MyUIFixes
+## Notes: 动作条 + 背包按钮 + 聊天框样式 + 小地图 + 任务日志双宽/隐藏追踪框
+
 ActionBars.lua
+Bag.lua
 ChatFrame.lua
 MiniMap.lua
+Questlog.lua

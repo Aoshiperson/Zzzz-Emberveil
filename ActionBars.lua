@@ -1,634 +1,551 @@
 --[[
-  ActionBars.lua v3
+  ActionBars.lua —— 独立精简版
+  来源：从 UnrealUI (modules/actionbar.lua) 抽取核心逻辑重构，去除框架依赖
+  不含：设置面板、可拖拽、10条动作条、Classic贴图皮肤、AZERTY键盘映射
 
-  修复：确保两行动作条都正确显示
-  - ActionButton 1-12（第一行）
-  - MultiBarBottomLeftButton 1-12（第二行）
-  - MultiBarBottomRightButton 1-12（右下角）
+  已验证保留的关键修复：
+    - CURRENT_ACTIONBAR_PAGE 不可靠，自己解析当前页
+    - 冷却用 GetTime() 连续读数，不用估算，reload后依然准
+    - GCD（公共冷却）单独识别，不会跟真实长冷却混淆
+    - print() 已确认失效，全部用 DEFAULT_CHAT_FRAME:AddMessage
+    - SetFont 在已绑定Font对象的FontString上不生效，此文件不碰字体加载
+    - 隐藏原生按钮走 Hide()+EnableMouse(false)，不做"只隐藏视觉保留骨架"
+      那套处理（那套只用于原版目标框体家族，动作条本来就是直接Hide()）
+
+  已知未处理：
+    - 32位时间溢出修正（极端长时间运行冷却计时可能跳变，遇到再加）
 --]]
 
 -- ============================================================
--- 配置 / 运行期状态
+-- 配置表：想改布局/位置/大小，直接改这里的数字
 -- ============================================================
 
-local statusbarTexture = "Interface\\TargetingFrame\\UI-StatusBar"
+local CONFIG = {
+  buttonSize    = 34,
+  buttonSpacing = 2,
 
-local actionPanel = nil
-local utilityActionPanel = nil
-local auxiliaryPanel = nil
-local xpBar = nil
-local actionPageEvents = nil
-local actionResolversInstalled = false
-local bagPanel = nil
-local bagEvents = nil
+  showKeybind  = true,
+  showMacro    = true,
+  showCount    = true,
+  showCooldown = true,
+  showGCD      = true,
 
-local BUTTON_SIZE = 34
-local BUTTONS_PER_PAGE = 12
-local DEFAULT_ACTIONBAR_PAGES = 6
-
--- 需要隐藏的原生动作条元素：鹰头装饰、经验/声望/性能条、
--- 微章菜单等
-local HIDDEN_FRAME_NAMES = {
-  "MainMenuBarLeftEndCap", "MainMenuBarRightEndCap",
-  "MainMenuBarTexture0", "MainMenuBarTexture1",
-  "MainMenuBarTexture2", "MainMenuBarTexture3",
-  "MainMenuBarPageNumber", "MainMenuBarPageUpButton", "MainMenuBarPageDownButton",
-
-  "MainMenuExpBar", "ExhaustionTick", "MainMenuBarMaxLevelBar",
-  "MainMenuBarOverlayFrame", "ReputationWatchBar",
-  "MainMenuBarPerformanceBarFrame", "MainMenuBarPerformanceBar",
-
-  "CharacterMicroButton", "SpellbookMicroButton", "TalentMicroButton",
-  "QuestLogMicroButton", "SocialsMicroButton", "WorldMapMicroButton",
-  "MainMenuMicroButton", "HelpMicroButton",
+  bars = {
+    [1] = { enabled = true,  point = "BOTTOM", x = 0,   y = 18,  label = "主条(跟随翻页)" },
+    [2] = { enabled = true,  point = "BOTTOM", x = 0,   y = 58,  label = "MultiBarRight"       },
+    [3] = { enabled = false, point = "BOTTOM", x = 0,   y = 98,  label = "MultiBarLeft"        },
+    [4] = { enabled = true,  point = "BOTTOMRIGHT", x = -14, y = 18, label = "MultiBarBottomRight" },
+    [5] = { enabled = false, point = "BOTTOMLEFT",  x = 14,  y = 18, label = "MultiBarBottomLeft"  },
+  },
 }
 
--- 背包按钮不永久隐藏：打开背包时显示在右下角，关闭时自动隐藏。
-local BAG_BUTTON_NAMES = {
-  "MainMenuBarBackpackButton", "CharacterBag0Slot", "CharacterBag1Slot",
-  "CharacterBag2Slot", "CharacterBag3Slot", "KeyRingButton",
+local BAR_SLOT_BASE = {
+  [2] = 24,  -- MultiBarRight:       25-36
+  [3] = 36,  -- MultiBarLeft:        37-48
+  [4] = 48,  -- MultiBarBottomRight: 49-60
+  [5] = 60,  -- MultiBarBottomLeft:  61-72
+}
+
+local SLOTS_PER_BAR = 12
+local GCD_THRESHOLD = 2
+local CD_TICK = 0.1
+
+local CD_COLOR = {
+  normal = { 1, 1, 1 },
+  low    = { 1, 0.2, 0.2 },
+}
+
+local COLOR = {
+  usable     = { 1.00, 1.00, 1.00, 1.00 },
+  oom        = { 0.40, 0.40, 1.00, 1.00 },
+  unusable   = { 0.35, 0.35, 0.35, 1.00 },
+  outOfRange = { 1.00, 0.10, 0.10, 1.00 },
+  cooldown   = { 1.00, 0.20, 0.20, 1.00 },
 }
 
 -- ============================================================
--- 通用 UI 工具
+-- 工具函数
 -- ============================================================
 
-local function HideFrame(frame)
-  if not frame then return end
-  frame:Hide()
-  frame:SetAlpha(0)
-  frame:EnableMouse(false)
+local function Report(msg)
+  DEFAULT_CHAT_FRAME:AddMessage(msg)
 end
 
-local function CreatePanel(name, parent, level)
-  local panel = CreateFrame("Frame", name, parent or UIParent)
-  panel:SetFrameStrata("MEDIUM")
-  panel:SetFrameLevel(level or 1)
-  panel:SetBackdrop({
-    bgFile = "Interface\\Buttons\\WHITE8X8",
-    edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
-    tile = true,
-    tileSize = 8,
-    edgeSize = 10,
-    insets = { left = 2, right = 2, top = 2, bottom = 2 },
-  })
-  return panel
-end
-
-local function StyleActionButton(button)
-  if not button or button.ActionBarsStyled then return end
-  button.ActionBarsStyled = true
-  button:SetWidth(BUTTON_SIZE)
-  button:SetHeight(BUTTON_SIZE)
-
-  local normalTexture = button:GetNormalTexture()
-  if normalTexture then normalTexture:SetAlpha(0) end
-
-  local border = CreateFrame("Frame", nil, button)
-  border:SetPoint("TOPLEFT", button, "TOPLEFT", -2, 2)
-  border:SetPoint("BOTTOMRIGHT", button, "BOTTOMRIGHT", 2, -2)
-  border:SetFrameLevel(math.max(0, button:GetFrameLevel() - 1))
-  border:SetBackdrop({
-    bgFile = "Interface\\Buttons\\WHITE8X8",
-    edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
-    tile = true,
-    tileSize = 8,
-    edgeSize = 10,
-    insets = { left = 2, right = 2, top = 2, bottom = 2 },
-  })
-  border:SetBackdropColor(0.02, 0.025, 0.03, 0.96)
-  border:SetBackdropBorderColor(0.14, 0.18, 0.2, 1)
-  button.ActionBarsBorder = border
-end
-
-local function PlaceButton(button, panel, column, row)
-  if not button then return end
-  button:SetParent(panel)
-  button:ClearAllPoints()
-  button:SetPoint("BOTTOMLEFT", panel, "BOTTOMLEFT", 5 + (column - 1) * 36, 5 + row * 36)
-  StyleActionButton(button)
-  button:Show()
-end
-
--- ============================================================
--- 动作槽位解析
--- ============================================================
-
-local function ResolvePrimaryAction(button)
-  local buttonID = button and button:GetID()
-  if not buttonID then return nil end
-
-  local bonusOffset = 0
-  if type(GetBonusBarOffset) == "function" then
-    bonusOffset = tonumber(GetBonusBarOffset()) or 0
+local apiFnCache = {}
+local function ResolveApiFn(name)
+  local cached = apiFnCache[name]
+  if cached ~= nil then
+    if cached == false then return nil end
+    return cached
   end
-
-  local _, class
-  if type(UnitClass) == "function" then
-    _, class = UnitClass("player")
+  local fn = getglobal(name)
+  if type(fn) == "function" then
+    apiFnCache[name] = fn
+    return fn
   end
-  if class == "ROGUE" and bonusOffset > 0 and type(GetShapeshiftForm) == "function" then
-    local ok, activeForm = pcall(GetShapeshiftForm)
-    if ok and activeForm ~= nil and (tonumber(activeForm) or 0) == 0 then
-      bonusOffset = 0
-    end
-  end
+  apiFnCache[name] = false
+  return nil
+end
 
-  if bonusOffset > 0 then
-    local normalPages = tonumber(NUM_ACTIONBAR_PAGES) or DEFAULT_ACTIONBAR_PAGES
-    return buttonID + (normalPages + bonusOffset - 1) * BUTTONS_PER_PAGE
-  end
+local function Call(name, a, b, c)
+  local fn = ResolveApiFn(name)
+  if not fn then return nil end
+  local ok, r1, r2, r3 = pcall(fn, a, b, c)
+  if not ok then return nil end
+  return r1, r2, r3
+end
 
-  local maxPages = tonumber(NUM_ACTIONBAR_PAGES) or DEFAULT_ACTIONBAR_PAGES
-  local page = tonumber(CURRENT_ACTIONBAR_PAGE) or 1
-  if page < 1 or page > maxPages then page = 1 end
-  return buttonID + (page - 1) * BUTTONS_PER_PAGE
+local function Has(name)
+  return ResolveApiFn(name) and true or false
 end
 
 -- ============================================================
--- 挂钩原生 API
+-- 槽位解析
 -- ============================================================
+
+local function ActivePage()
+  local page = tonumber(getglobal("CURRENT_ACTIONBAR_PAGE")) or 1
+  local pages = tonumber(getglobal("NUM_ACTIONBAR_PAGES")) or 6
+  local offset = tonumber(Call("GetBonusBarOffset")) or 0
+  if page == 1 and offset ~= 0 then return pages + offset end
+  if page < 1 then return 1 end
+  return page
+end
+
+local function SlotFor(bar, index)
+  if bar == 1 then
+    return (ActivePage() - 1) * SLOTS_PER_BAR + index
+  end
+  return (BAR_SLOT_BASE[bar] or (bar - 1) * SLOTS_PER_BAR) + index
+end
+
+-- ============================================================
+-- 挂钩原生 API（未经文档确认，装之前先测存在性）
+-- ============================================================
+
+local resolversInstalled = false
 
 local function InstallActionResolvers()
-  if actionResolversInstalled then return end
-  actionResolversInstalled = true
+  if resolversInstalled then return end
+  resolversInstalled = true
+
+  local missing = {}
 
   local originalActionResolver = ActionButton_GetPagedID
-  _G.ActionButton_GetPagedID = function(button)
-    if button and button.ActionBarsAction then
-      return button.ActionBarsAction
-    end
-    if button and button.ActionBarsPrimaryAction then
-      return ResolvePrimaryAction(button)
-    end
+  if type(originalActionResolver) ~= "function" then table.insert(missing, "ActionButton_GetPagedID") end
+  ActionButton_GetPagedID = function(button)
+    local b = button or this
+    if b and b.uuiSlot then return b.uuiSlot end
     if originalActionResolver then return originalActionResolver(button) end
-    return button and button:GetID()
+    return b and b:GetID()
   end
 
   local originalMultiResolver = MultiActionButton_GetPagedID
-  _G.MultiActionButton_GetPagedID = function(button)
-    if button and button.ActionBarsAction then
-      return button.ActionBarsAction
-    end
+  if type(originalMultiResolver) ~= "function" then table.insert(missing, "MultiActionButton_GetPagedID") end
+  MultiActionButton_GetPagedID = function(button)
+    local b = button or this
+    if b and b.uuiSlot then return b.uuiSlot end
     if originalMultiResolver then return originalMultiResolver(button) end
-    return button and button:GetID()
+    return b and b:GetID()
   end
 
-  local originalActionButtonDown = ActionButtonDown
-  if type(originalActionButtonDown) == "function" then
-    _G.ActionButtonDown = function(id)
-      local activeButton = _G["ActionButton" .. tostring(id or "")]
-      if not activeButton or not activeButton.ActionBarsPrimaryAction then
-        return originalActionButtonDown(id)
-      end
-      if activeButton:GetButtonState() == "NORMAL" then
-        activeButton:SetButtonState("PUSHED")
-      end
-    end
-  end
-
-  local originalActionButtonUp = ActionButtonUp
-  if type(originalActionButtonUp) == "function" then
-    _G.ActionButtonUp = function(id, onSelf)
-      local activeButton = _G["ActionButton" .. tostring(id or "")]
-      if not activeButton or not activeButton.ActionBarsPrimaryAction then
-        return originalActionButtonUp(id, onSelf)
-      end
-      if activeButton:GetButtonState() ~= "PUSHED" then return end
-      activeButton:SetButtonState("NORMAL")
-      if MacroFrame_SaveMacro then MacroFrame_SaveMacro() end
-
-      local action = ResolvePrimaryAction(activeButton)
-      if action and type(UseAction) == "function" then
-        UseAction(action, 0, onSelf)
-      end
-      if action and type(IsCurrentAction) == "function" and IsCurrentAction(action) then
-        activeButton:SetChecked(1)
-      else
-        activeButton:SetChecked(0)
-      end
-    end
-  end
-end
-
-local function RefreshActionButtons()
-  local function RefreshMultiButton(prefix, index)
-    local multiButton = _G[prefix .. index]
-    if not multiButton then return end
-    if type(MultiActionButton_Update) == "function" then
-      pcall(MultiActionButton_Update, multiButton)
-    elseif type(ActionButton_Update) == "function" then
-      pcall(ActionButton_Update, multiButton)
-    end
-  end
-
-  for i = 1, BUTTONS_PER_PAGE do
-    local button = _G["ActionButton" .. i]
-    if button then
-      button.action = ResolvePrimaryAction(button)
-      if type(ActionButton_Update) == "function" then pcall(ActionButton_Update, button) end
-      if type(ActionButton_UpdateUsable) == "function" then pcall(ActionButton_UpdateUsable, button) end
-      if type(ActionButton_UpdateCooldown) == "function" then pcall(ActionButton_UpdateCooldown, button) end
-    end
-
-    RefreshMultiButton("MultiBarBottomLeftButton", i)
-    RefreshMultiButton("MultiBarBottomRightButton", i)
+  if #missing > 0 then
+    Report("|cffffaa00ActionBars: 以下FrameXML函数缺失: " .. table.concat(missing, ", ") .. "|r")
   end
 end
 
 -- ============================================================
--- 辅助动作条（姿态/变形形态 + 宠物）
+-- 光标状态
 -- ============================================================
 
-local function PositionAuxiliaryBars()
-  if not auxiliaryPanel then
-    local panel = CreateFrame("Frame", nil, UIParent)
-    panel:SetWidth(362)
-    panel:SetHeight(38)
-    panel:SetFrameStrata("MEDIUM")
-    panel:SetFrameLevel(4)
-
-    local halfwayToRightEdge = (UIParent:GetWidth() or 1024) / 4
-    panel:SetPoint("BOTTOM", UIParent, "BOTTOM", halfwayToRightEdge, 18)
-
-    auxiliaryPanel = panel
-  end
-  local panel = auxiliaryPanel
-
-  local function PlaceAuxiliaryButtons(prefix, visibleCount, row)
-    for i = 1, 10 do
-      local button = _G[prefix .. i]
-      if button then
-        button:SetParent(panel)
-        button:SetWidth(BUTTON_SIZE)
-        button:SetHeight(BUTTON_SIZE)
-        button:ClearAllPoints()
-        button:SetPoint("BOTTOMLEFT", panel, "BOTTOMLEFT", 2 + (i - 1) * 36, 2 + row * 36)
-        StyleActionButton(button)
-        if i <= visibleCount then button:Show() else button:Hide() end
-      end
-    end
-  end
-
-  local formCount = 0
-  if type(GetNumShapeshiftForms) == "function" then
-    formCount = tonumber(GetNumShapeshiftForms()) or 0
-  end
-  if ShapeshiftBarFrame then
-    ShapeshiftBarFrame:SetAlpha(0)
-    ShapeshiftBarFrame:EnableMouse(false)
-    PlaceAuxiliaryButtons("ShapeshiftButton", formCount, 0)
-  end
-
-  local hasPet = false
-  if type(HasPetUI) == "function" then
-    local petUI = HasPetUI()
-    hasPet = petUI == true or petUI == 1 or petUI == "1"
-  end
-  if not hasPet and type(UnitExists) == "function" then
-    local petExists = UnitExists("pet")
-    hasPet = petExists == true or petExists == 1 or petExists == "1"
-  end
-  if PetActionBarFrame then
-    PetActionBarFrame:SetAlpha(0)
-    PetActionBarFrame:EnableMouse(false)
-    PlaceAuxiliaryButtons("PetActionButton", hasPet and 10 or 0, formCount > 0 and 1 or 0)
-  end
-
-  local panelHeight = (hasPet and formCount > 0) and 74 or 38
-  panel:SetWidth(362)
-  panel:SetHeight(panelHeight)
-end
-
-local function SetupActionPageEvents()
-  if actionPageEvents then return end
-
-  local events = CreateFrame("Frame", nil)
-
-  local EVENT_NAMES = {
-    "UPDATE_BONUS_ACTIONBAR", "ACTIONBAR_PAGE_CHANGED",
-    "UPDATE_SHAPESHIFT_FORM", "UPDATE_SHAPESHIFT_FORMS",
-    "PLAYER_AURAS_CHANGED", "PLAYER_ENTER_COMBAT", "PLAYER_LEAVE_COMBAT",
-    "ACTIONBAR_SLOT_CHANGED", "PET_BAR_UPDATE", "UNIT_PET",
-  }
-  for _, eventName in ipairs(EVENT_NAMES) do
-    pcall(events.RegisterEvent, events, eventName)
-  end
-
-  local REFRESH_WINDOW = 0.75
-  local REFRESH_INTERVAL = 0.05
-
-  local function OnUpdateDuringTransition(frame, elapsed)
-    frame.refreshElapsed = (frame.refreshElapsed or 0) + (elapsed or 0)
-    frame.refreshRemaining = (frame.refreshRemaining or 0) - (elapsed or 0)
-    if frame.refreshElapsed >= REFRESH_INTERVAL or frame.refreshRemaining <= 0 then
-      frame.refreshElapsed = 0
-      RefreshActionButtons()
-      PositionAuxiliaryBars()
-    end
-    if frame.refreshRemaining <= 0 then
-      frame:SetScript("OnUpdate", nil)
-    end
-  end
-
-  events:SetScript("OnEvent", function()
-    RefreshActionButtons()
-    PositionAuxiliaryBars()
-    events.refreshElapsed = 0
-    events.refreshRemaining = REFRESH_WINDOW
-    events:SetScript("OnUpdate", OnUpdateDuringTransition)
-  end)
-
-  actionPageEvents = events
-end
-
--- ============================================================
--- 背包按钮（打开背包时显示在右下角，关闭时隐藏）
--- ============================================================
-
-local function IsAnyContainerFrameShown()
-  local frameCount = tonumber(NUM_CONTAINER_FRAMES) or 13
-  for i = 1, frameCount do
-    local frame = _G["ContainerFrame" .. i]
-    if frame and frame:IsShown() then
-      return true
-    end
-  end
+local function CursorHoldsAction()
+  if Call("CursorHasItem") then return true end
+  if Call("CursorHasSpell") then return true end
+  if Call("CursorHasMacro") then return true end
   return false
 end
 
-local function UpdateBagPanelVisibility()
-  if not bagPanel then return end
-  if IsAnyContainerFrameShown() then
-    bagPanel:Show()
-  else
-    bagPanel:Hide()
+-- ============================================================
+-- 按钮点击/拖拽
+-- ============================================================
+
+local function OnButtonClick(button)
+  local slot = button.uuiSlot
+  if CursorHoldsAction() then
+    Call("PickupAction", slot)
+    return
+  end
+  Call("UseAction", slot)
+end
+
+local function OnButtonDragStart(button)
+  Call("PickupAction", button.uuiSlot)
+end
+
+local function OnButtonReceiveDrag(button)
+  Call("PlaceAction", button.uuiSlot)
+end
+
+local function ShowTooltip(button)
+  local tooltip = GameTooltip
+  if not tooltip then return end
+  pcall(tooltip.SetOwner, tooltip, button, "ANCHOR_RIGHT")
+  if not pcall(tooltip.SetAction, tooltip, button.uuiSlot) then
+    pcall(tooltip.Hide, tooltip)
   end
 end
 
-local function PositionBagButtons()
-  if not bagPanel then
-    local panel = CreateFrame("Frame", nil, UIParent)
-    panel:SetFrameStrata("MEDIUM")
-    panel:SetFrameLevel(4)
-    panel:SetPoint("BOTTOMRIGHT", UIParent, "BOTTOMRIGHT", -14, 66)
-    bagPanel = panel
+local function HideTooltip()
+  if GameTooltip then pcall(GameTooltip.Hide, GameTooltip) end
+end
 
-    local column = 0
-    for _, name in ipairs(BAG_BUTTON_NAMES) do
-      local button = _G[name]
-      if button then
-        button:SetParent(panel)
-        button:ClearAllPoints()
-        button:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", -column * 32, 0)
-        button:Show()
-        column = column + 1
+-- ============================================================
+-- 冷却计算
+-- ============================================================
+
+local function CooldownRemaining(start, duration)
+  local now = tonumber(Call("GetTime")) or 0
+  if start <= now then
+    return duration - (now - start)
+  end
+  return nil
+end
+
+local function FormatCooldown(remaining)
+  if remaining >= 60 then
+    return string.format("%dm", math.floor(remaining / 60)), CD_COLOR.normal
+  elseif remaining >= 10 then
+    return string.format("%d", math.floor(remaining)), CD_COLOR.normal
+  else
+    return string.format("%.1f", remaining), CD_COLOR.low
+  end
+end
+
+local gcdStart, gcdDuration
+
+local function NoteGCD(slot, start, duration)
+  if not CONFIG.showGCD then return end
+  if start <= 0 or duration <= 0 or duration >= GCD_THRESHOLD then return end
+  if Call("IsConsumableAction", slot) then return end
+  gcdStart, gcdDuration = start, duration
+end
+
+-- ============================================================
+-- 按钮状态刷新
+-- ============================================================
+
+local function UpdateSlot(button)
+  local slot = button.uuiSlot
+  local texture = Call("GetActionTexture", slot)
+  if type(texture) == "string" and texture ~= "" then
+    pcall(button.uuiIcon.SetTexture, button.uuiIcon, texture)
+    button.uuiIcon:Show()
+    button.uuiEmpty = false
+  else
+    pcall(button.uuiIcon.SetTexture, button.uuiIcon, nil)
+    button.uuiIcon:Hide()
+    button.uuiEmpty = true
+  end
+
+  if CONFIG.showCount and button.uuiCount then
+    local n = tonumber(Call("GetActionCount", slot))
+    if n and n > 0 then
+      button.uuiCount:SetText(tostring(n))
+      button.uuiCount:Show()
+    else
+      button.uuiCount:SetText("")
+      button.uuiCount:Hide()
+    end
+  end
+
+  if CONFIG.showMacro and button.uuiMacro then
+    local macro = Call("GetActionText", slot)
+    if type(macro) == "string" and macro ~= "" then
+      button.uuiMacro:SetText(macro)
+      button.uuiMacro:Show()
+    else
+      button.uuiMacro:SetText("")
+      button.uuiMacro:Hide()
+    end
+  end
+
+  if CONFIG.showKeybind and button.uuiKeybind then
+    local prefix = button.uuiBindingPrefix
+    local key = prefix and Call("GetBindingKey", prefix .. button.uuiIndex)
+    if type(key) == "string" and key ~= "" then
+      button.uuiKeybind:SetText(key)
+      button.uuiKeybind:Show()
+    else
+      button.uuiKeybind:SetText("")
+      button.uuiKeybind:Hide()
+    end
+  end
+end
+
+local function UpdateUsable(button)
+  if button.uuiEmpty then return end
+  local slot = button.uuiSlot
+  local color = COLOR.usable
+
+  if button.uuiCdActive then
+    color = COLOR.cooldown
+  else
+    local hasRange = true
+    if Has("ActionHasRange") then
+      hasRange = Call("ActionHasRange", slot) and true or false
+    end
+    if hasRange then
+      local inRange = Call("IsActionInRange", slot)
+      if tonumber(inRange) == 0 or inRange == false then
+        color = COLOR.outOfRange
       end
     end
-    panel:SetWidth(math.max(1, column * 32))
-    panel:SetHeight(32)
+    if color == COLOR.usable then
+      local usable, oom = Call("IsUsableAction", slot)
+      if oom and oom ~= 0 then
+        color = COLOR.oom
+      elseif usable ~= nil and (usable == false or usable == 0) then
+        color = COLOR.unusable
+      end
+    end
   end
 
-  UpdateBagPanelVisibility()
+  pcall(button.uuiIcon.SetVertexColor, button.uuiIcon, color[1], color[2], color[3], color[4])
 end
 
-local function SetupBagEvents()
-  if bagEvents then return end
+local function UpdateCooldown(button)
+  local slot = button.uuiSlot
+  local start, duration, enable = Call("GetActionCooldown", slot)
+  start = tonumber(start) or 0
+  duration = tonumber(duration) or 0
+  enable = tonumber(enable)
 
-  local events = CreateFrame("Frame", nil)
-  events:RegisterEvent("BAG_OPEN")
-  events:RegisterEvent("BAG_CLOSED")
-  events:RegisterEvent("PLAYER_ENTERING_WORLD")
-  
-  events:SetScript("OnEvent", function()
-    UpdateBagPanelVisibility()
-  end)
+  if button.uuiCooldown and type(CooldownFrame_SetTimer) == "function" then
+    pcall(CooldownFrame_SetTimer, button.uuiCooldown, start, duration, enable or 1)
+  end
 
-  bagEvents = events
+  if enable == nil or enable > 0 then NoteGCD(slot, start, duration) end
+
+  button.uuiCdStart = start
+  button.uuiCdDuration = duration
+  button.uuiCdActive = (start > 0 and duration >= GCD_THRESHOLD
+                        and (enable == nil or enable > 0)) and true or false
+
+  if not CONFIG.showCooldown or not button.uuiCooldownText then return end
+  local remaining = button.uuiCdActive and CooldownRemaining(start, duration)
+  if not remaining or remaining <= 0 then
+    button.uuiCooldownText:SetText("")
+    button.uuiCooldownText:Hide()
+    return
+  end
+  local text, color = FormatCooldown(remaining)
+  button.uuiCooldownText:SetText(text)
+  pcall(button.uuiCooldownText.SetTextColor, button.uuiCooldownText, color[1], color[2], color[3])
+  button.uuiCooldownText:Show()
+end
+
+local function FullUpdate(button)
+  UpdateSlot(button)
+  UpdateCooldown(button)
+  UpdateUsable(button)
 end
 
 -- ============================================================
--- 经验条
+-- 按钮创建
 -- ============================================================
 
-local function FormatXPText(level, percent, resting, rested)
-  local text = "Level " .. level
-  if percent then
-    text = text .. "  -  " .. percent .. "%"
-  else
-    text = text .. "  -  Maximum Level"
-  end
+local function CreateButton(bar, index, parent)
+  local name = "SimpleActionBar" .. bar .. "Button" .. index
+  local button = CreateFrame("Button", name, parent)
+  button.uuiBar = bar
+  button.uuiIndex = index
+  button.uuiBindingPrefix = (bar == 2) and "MULTIACTIONBAR3BUTTON"
+                          or (bar == 3) and "MULTIACTIONBAR4BUTTON"
+                          or (bar == 4) and "MULTIACTIONBAR2BUTTON"
+                          or (bar == 5) and "MULTIACTIONBAR1BUTTON"
+                          or nil
 
-  if resting and rested and rested > 0 then
-    text = text .. "  |cff66aaffResting  -  Rested " .. rested .. "|r"
-  elseif resting then
-    text = text .. "  |cff66aaffResting|r"
-  elseif rested and rested > 0 then
-    text = text .. "  |cff66aaffRested " .. rested .. "|r"
-  end
+  button:SetWidth(CONFIG.buttonSize)
+  button:SetHeight(CONFIG.buttonSize)
+  pcall(button.EnableMouse, button, true)
+  pcall(button.RegisterForClicks, button, "LeftButtonUp", "RightButtonUp")
+  pcall(button.RegisterForDrag, button, "LeftButton")
 
-  return text
-end
-
-local function UpdateXPBar()
-  local bar = xpBar
-  if not bar then return end
-
-  local current = UnitXP("player") or 0
-  local maximum = UnitXPMax("player") or 0
-  local level = UnitLevel("player") or 0
-
-  local rested = 0
-  if type(GetXPExhaustion) == "function" then
-    rested = GetXPExhaustion() or 0
-  end
-
-  local resting = false
-  if type(IsResting) == "function" then
-    local ok, value = pcall(IsResting)
-    resting = ok and (value == true or value == 1 or value == "1")
-  end
-
-  if resting then
-    bar:SetStatusBarColor(0.18, 0.48, 0.92)
-    bar:SetBackdropBorderColor(0.35, 0.62, 1, 1)
-  else
-    bar:SetStatusBarColor(0.38, 0.28, 0.78)
-    bar:SetBackdropBorderColor(0.18, 0.22, 0.28, 1)
-  end
-
-  if maximum > 0 then
-    local percent = math.floor(current / maximum * 100)
-    bar:SetMinMaxValues(0, maximum)
-    bar:SetValue(current)
-    bar.text:SetText(FormatXPText(level, percent, resting, rested))
-  else
-    bar:SetMinMaxValues(0, 1)
-    bar:SetValue(1)
-    bar.text:SetText(FormatXPText(level, nil, resting, rested))
-  end
-
-  bar.current = current
-  bar.maximum = maximum
-  bar.rested = rested
-  bar.resting = resting
-end
-
-local function SetupXPBar()
-  if xpBar then return end
-
-  local parent = actionPanel or UIParent
-  local bar = CreateFrame("StatusBar", nil, parent)
-  bar:SetWidth(442)
-  bar:SetHeight(12)
-  if actionPanel then
-    bar:SetPoint("TOP", actionPanel, "BOTTOM", 0, -4)
-  else
-    bar:SetPoint("BOTTOM", UIParent, "BOTTOM", 0, 18)
-  end
-  bar:SetStatusBarTexture(statusbarTexture)
-  bar:SetStatusBarColor(0.38, 0.28, 0.78)
-  bar:SetFrameLevel((parent:GetFrameLevel() or 1) + 3)
-  bar:SetBackdrop({
+  button:SetBackdrop({
     bgFile = "Interface\\Buttons\\WHITE8X8",
     edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
-    tile = true,
-    tileSize = 8,
-    edgeSize = 8,
+    tile = true, tileSize = 8, edgeSize = 9,
     insets = { left = 2, right = 2, top = 2, bottom = 2 },
   })
-  bar:SetBackdropColor(0.025, 0.03, 0.04, 0.8)
-  bar:SetBackdropBorderColor(0.18, 0.22, 0.28, 1)
+  button:SetBackdropColor(0.02, 0.025, 0.03, 0.9)
+  button:SetBackdropBorderColor(0.25, 0.28, 0.3, 1)
 
-  bar.background = bar:CreateTexture(nil, "BACKGROUND")
-  bar.background:SetAllPoints()
-  bar.background:SetTexture(statusbarTexture)
-  bar.background:SetVertexColor(0.035, 0.04, 0.055, 0.9)
+  local icon = button:CreateTexture(nil, "ARTWORK")
+  icon:SetPoint("TOPLEFT", button, "TOPLEFT", 2, -2)
+  icon:SetPoint("BOTTOMRIGHT", button, "BOTTOMRIGHT", -2, 2)
+  icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+  button.uuiIcon = icon
 
-  bar.text = bar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-  bar.text:SetPoint("CENTER", bar, "CENTER", 0, 0)
+  button.uuiKeybind = button:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+  button.uuiKeybind:SetPoint("TOPRIGHT", button, "TOPRIGHT", -2, -2)
 
-  bar:EnableMouse(true)
-  bar:SetScript("OnEnter", function(frame)
-    GameTooltip:SetOwner(frame, "ANCHOR_TOP")
-    GameTooltip:SetText("Experience")
-    if frame.maximum and frame.maximum > 0 then
-      GameTooltip:AddLine(frame.current .. " / " .. frame.maximum, 1, 1, 1)
-      if frame.rested and frame.rested > 0 then
-        GameTooltip:AddLine("Rested: " .. frame.rested, 0.4, 0.65, 1)
+  button.uuiCount = button:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+  button.uuiCount:SetPoint("BOTTOMRIGHT", button, "BOTTOMRIGHT", -2, 2)
+
+  button.uuiMacro = button:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+  button.uuiMacro:SetPoint("BOTTOMLEFT", button, "BOTTOMLEFT", 2, 2)
+  button.uuiMacro:SetWidth(CONFIG.buttonSize - 6)
+
+  local ok, cooldown = pcall(CreateFrame, "Model", name .. "Cooldown", button, "CooldownFrameTemplate")
+  if ok and cooldown and type(CooldownFrame_SetTimer) == "function" then
+    pcall(cooldown.SetAllPoints, cooldown, button)
+    button.uuiCooldown = cooldown
+  end
+
+  button.uuiCooldownText = button:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+  button.uuiCooldownText:SetPoint("CENTER", button, "CENTER", 0, 0)
+
+  button:SetScript("OnClick", function() OnButtonClick(button) end)
+  button:SetScript("OnDragStart", function() OnButtonDragStart(button) end)
+  button:SetScript("OnReceiveDrag", function() OnButtonReceiveDrag(button) end)
+  button:SetScript("OnEnter", function() ShowTooltip(button) end)
+  button:SetScript("OnLeave", function() HideTooltip() end)
+
+  return button
+end
+
+-- ============================================================
+-- 动作条创建
+-- ============================================================
+
+local bars = {}
+
+local function CreateBar(barIndex)
+  local spec = CONFIG.bars[barIndex]
+  if not spec or not spec.enabled then return end
+
+  local frame = CreateFrame("Frame", "SimpleActionBar" .. barIndex, UIParent)
+  frame:SetPoint(spec.point, UIParent, spec.point, spec.x, spec.y)
+
+  local buttons = {}
+  local i
+  for i = 1, SLOTS_PER_BAR do
+    local button = CreateButton(barIndex, i, frame)
+    button:ClearAllPoints()
+    button:SetPoint("LEFT", frame, "LEFT", (i - 1) * (CONFIG.buttonSize + CONFIG.buttonSpacing), 0)
+    buttons[i] = button
+  end
+
+  frame:SetWidth(SLOTS_PER_BAR * (CONFIG.buttonSize + CONFIG.buttonSpacing))
+  frame:SetHeight(CONFIG.buttonSize)
+
+  bars[barIndex] = { frame = frame, buttons = buttons }
+end
+
+local function RefreshSlot(button)
+  button.uuiSlot = SlotFor(button.uuiBar, button.uuiIndex)
+  FullUpdate(button)
+end
+
+local function RefreshAll()
+  local bar, entry
+  for bar, entry in pairs(bars) do
+    local i
+    for i = 1, table.getn(entry.buttons) do
+      RefreshSlot(entry.buttons[i])
+    end
+  end
+end
+
+-- ============================================================
+-- 隐藏原生条（保留原生对象存在，Hide()+关闭鼠标响应）
+-- ============================================================
+
+local HIDDEN_FRAMES = {
+  "MainMenuBar", "MainMenuBarArtFrame",
+  "MainMenuBarLeftEndCap", "MainMenuBarRightEndCap",
+  "MultiBarRight", "MultiBarLeft", "MultiBarBottomLeft", "MultiBarBottomRight",
+}
+
+local NATIVE_BUTTON_PREFIXES = {
+  "ActionButton",
+  "MultiBarRightButton",
+  "MultiBarLeftButton",
+  "MultiBarBottomRightButton",
+  "MultiBarBottomLeftButton",
+}
+
+local function HideNativeBars()
+  local i
+  for i = 1, table.getn(HIDDEN_FRAMES) do
+    local frame = getglobal(HIDDEN_FRAMES[i])
+    if frame then
+      frame:Hide()
+      frame:SetAlpha(0)
+      pcall(frame.EnableMouse, frame, false)
+    end
+  end
+
+  local prefixIndex, slotIndex
+  for prefixIndex = 1, table.getn(NATIVE_BUTTON_PREFIXES) do
+    local prefix = NATIVE_BUTTON_PREFIXES[prefixIndex]
+    for slotIndex = 1, SLOTS_PER_BAR do
+      local button = getglobal(prefix .. slotIndex)
+      if button then
+        pcall(button.EnableMouse, button, false)
       end
-    else
-      GameTooltip:AddLine("Maximum level", 1, 0.82, 0.2)
     end
-    if frame.resting then
-      GameTooltip:AddLine("Currently resting", 0.4, 0.65, 1)
-    end
-    GameTooltip:Show()
-  end)
-  bar:SetScript("OnLeave", function() GameTooltip:Hide() end)
-
-  local events = CreateFrame("Frame", nil)
-  events:RegisterEvent("PLAYER_XP_UPDATE")
-  events:RegisterEvent("UPDATE_EXHAUSTION")
-  events:RegisterEvent("PLAYER_LEVEL_UP")
-  events:RegisterEvent("PLAYER_ENTERING_WORLD")
-  pcall(events.RegisterEvent, events, "PLAYER_UPDATE_RESTING")
-  
-  events:SetScript("OnEvent", function()
-    UpdateXPBar()
-  end)
-
-  xpBar = bar
-  UpdateXPBar()
+  end
 end
 
 -- ============================================================
--- 入口：接管原生动作条
+-- 定时刷新
 -- ============================================================
 
-local function SetupActionBars()
+local cdTimer = 0
+local function OnUpdateCooldownText(elapsed)
+  cdTimer = cdTimer + (elapsed or 0)
+  if cdTimer < CD_TICK then return end
+  cdTimer = 0
+  local bar, entry
+  for bar, entry in pairs(bars) do
+    local i
+    for i = 1, table.getn(entry.buttons) do
+      UpdateCooldown(entry.buttons[i])
+    end
+  end
+end
+
+-- ============================================================
+-- 入口
+-- ============================================================
+
+local function Setup()
   InstallActionResolvers()
+  HideNativeBars()
 
-  for _, name in ipairs(HIDDEN_FRAME_NAMES) do
-    HideFrame(_G[name])
+  local i
+  for i = 1, 5 do
+    CreateBar(i)
   end
 
-  local panel = CreatePanel(nil, UIParent, 1)
-  panel:SetWidth(442)
-  panel:SetHeight(82)
-  panel:SetPoint("BOTTOM", UIParent, "BOTTOM", 0, 18)
-  panel:SetBackdropColor(0, 0, 0, 0)
-  panel:SetBackdropBorderColor(0, 0, 0, 0)
-  actionPanel = panel
+  RefreshAll()
 
-  local utilityPanel = CreatePanel(nil, UIParent, 1)
-  utilityPanel:SetWidth(442)
-  utilityPanel:SetHeight(44)
-  utilityPanel:SetPoint("BOTTOMRIGHT", UIParent, "BOTTOMRIGHT", -14, 14)
-  utilityPanel:SetBackdropColor(0, 0, 0, 0)
-  utilityPanel:SetBackdropBorderColor(0, 0, 0, 0)
-  utilityActionPanel = utilityPanel
-
-  -- 第一行：ActionButton 1-12 （主动作条）
-  for i = 1, BUTTONS_PER_PAGE do
-    local primaryButton = _G["ActionButton" .. i]
-    if primaryButton then
-      primaryButton.ActionBarsPrimaryAction = true
-    end
-    PlaceButton(primaryButton, panel, i, 0)
-  end
-
-  -- 第二行：MultiBarBottomLeftButton 1-12 （上层按钮）
-  for i = 1, BUTTONS_PER_PAGE do
-    local upperButton = _G["MultiBarBottomLeftButton" .. i]
-    if upperButton then
-      upperButton.ActionBarsAction = 60 + i
-      upperButton.action = 60 + i
-    end
-    PlaceButton(upperButton, panel, i, 1)
-  end
-
-  -- 右下角：MultiBarBottomRightButton 1-12 （实用按钮）
-  for i = 1, BUTTONS_PER_PAGE do
-    local utilityButton = _G["MultiBarBottomRightButton" .. i]
-    if utilityButton then
-      utilityButton.ActionBarsAction = 48 + i
-      utilityButton.action = 48 + i
-    end
-    PlaceButton(utilityButton, utilityPanel, i, 0)
-  end
-
-  SetupActionPageEvents()
-  RefreshActionButtons()
-
-  -- 隐藏原生动作条框架（但不影响已重新父级化的按钮）
-  HideFrame(MainMenuBarArtFrame)
-  HideFrame(MainMenuBar)
-  -- 注：MultiBarBottomLeft 和 MultiBarBottomRight 的按钮已被重新父级化
-  -- 所以隐藏这些框架不会影响按钮显示
-
-  PositionAuxiliaryBars()
-  PositionBagButtons()
-  SetupBagEvents()
+  local events = CreateFrame("Frame")
+  pcall(events.RegisterEvent, events, "ACTIONBAR_SLOT_CHANGED")
+  pcall(events.RegisterEvent, events, "ACTIONBAR_PAGE_CHANGED")
+  pcall(events.RegisterEvent, events, "UPDATE_BONUS_ACTIONBAR")
+  pcall(events.RegisterEvent, events, "PLAYER_ENTER_COMBAT")
+  pcall(events.RegisterEvent, events, "PLAYER_LEAVE_COMBAT")
+  events:SetScript("OnEvent", RefreshAll)
+  events:SetScript("OnUpdate", OnUpdateCooldownText)
 end
 
--- ============================================================
--- 入口：等玩家登录完成再接管动作条
--- ============================================================
+local bootstrap = CreateFrame("Frame")
+bootstrap:RegisterEvent("PLAYER_ENTERING_WORLD")
+bootstrap:SetScript("OnEvent", function()
+  pcall(function() bootstrap:UnregisterEvent("PLAYER_ENTERING_WORLD") end)
+  pcall(Setup)
+end)
 
-local bootstrap = CreateFrame("Frame", nil, UIParent)
-if bootstrap then
-  bootstrap:RegisterEvent("PLAYER_LOGIN")
-  
-  bootstrap:SetScript("OnEvent", function()
-    pcall(function()
-      bootstrap:UnregisterEvent("PLAYER_LOGIN")
-    end)
-    pcall(SetupActionBars)
-    pcall(SetupXPBar)
-  end)
-  
-  print("|cffff00ffActionBars v3: Loaded successfully|r")
-else
-  print("|cffff0000ActionBars: Failed to create bootstrap frame|r")
-end
+Report("|cffff00ffSimpleActionBars: Loaded|r")
