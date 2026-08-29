@@ -1,43 +1,24 @@
 --[[
-  QuestLogDualWidth.lua —— 独立版
-  功能1：任务日志双宽（打开即展开，不需要额外点击）
-  功能2：隐藏原生任务追踪框（QuestWatchFrame，小地图下方那个任务列表）
-
-  来源：从 UnrealUI (modules/questlog.lua) 抽取重构
-  不含：字体重新上色、原生装饰条纹清除、任务追踪记忆、可拖拽移动
-
-  核心原理（双宽为什么单纯 SetWidth 不够）：
-    QuestLogFrame 内部有个独立的详情面板对象
-    （QuestLogDetailScrollFrame），默认隐藏。真正的双宽 = 同步做两件事：
-      1. 窗口宽度从 340（单栏）改成 676（双栏）
-      2. 显示详情面板，填满新增出来的空间
+  Questlog_2.lua —— 修复错位与自适应优化版
 --]]
 
-local WIDTH_COLLAPSED = 340
-local WIDTH_EXPANDED  = 676
-
-local frame, detail
-
--- ============================================================
--- 功能1：双宽
--- ============================================================
+local WIDTH_EXPANDED = 676
 
 local function SetupDualWidth()
-  frame = getglobal("QuestLogFrame")
-  detail = getglobal("QuestLogDetailScrollFrame")
+  local frame = getglobal("QuestLogFrame")
+  local detail = getglobal("QuestLogDetailScrollFrame")
 
-  if not frame then
-    DEFAULT_CHAT_FRAME:AddMessage("|cffff0000QuestLogDualWidth: QuestLogFrame 不存在|r")
-    return
-  end
-  if not detail then
-    DEFAULT_CHAT_FRAME:AddMessage("|cffff0000QuestLogDualWidth: QuestLogDetailScrollFrame 不存在，双宽功能无法使用|r")
-    return
-  end
+  if not frame or not detail then return end
 
+  -- 强制设定主窗口和背景宽度，防止错位
   pcall(frame.SetWidth, frame, WIDTH_EXPANDED)
   pcall(detail.Show, detail)
   detail.uuiUserHidden = nil
+
+  -- 尝试调整背景材质（如果存在）
+  if QuestLogDetailFrameBackdrop then
+    pcall(QuestLogDetailFrameBackdrop.SetWidth, QuestLogDetailFrameBackdrop, WIDTH_EXPANDED)
+  end
 
   local originalOnShow = detail:GetScript("OnShow")
   detail:SetScript("OnShow", function()
@@ -52,44 +33,28 @@ local function SetupDualWidth()
     pcall(frame.SetWidth, frame, WIDTH_EXPANDED)
   end)
 
-  DEFAULT_CHAT_FRAME:AddMessage("|cffff00ffQuestLogDualWidth: 双宽已启用|r")
+  if DEFAULT_CHAT_FRAME then
+    DEFAULT_CHAT_FRAME:AddMessage("|cffff00ffQuestLogDualWidth: 双栏已自适应调整|r")
+  end
 end
-
--- ============================================================
--- 功能2：隐藏原生任务追踪框
--- ============================================================
 
 local function HideQuestWatch()
   local watch = getglobal("QuestWatchFrame")
-  if not watch then
-    DEFAULT_CHAT_FRAME:AddMessage("|cffff0000QuestLogDualWidth: QuestWatchFrame 不存在|r")
-    return
+  if watch then
+    watch:Hide()
+    watch:SetAlpha(0)
+    pcall(watch.EnableMouse, watch, false)
+    if type(watch.HookScript) == "function" then
+      pcall(watch.HookScript, watch, "OnShow", function() watch:Hide() end)
+    end
   end
-
-  watch:Hide()
-  watch:SetAlpha(0)
-  pcall(watch.EnableMouse, watch, false)
-
-  -- 防止原生逻辑在任务更新时把它重新弹出来
-  if type(watch.HookScript) == "function" then
-    pcall(watch.HookScript, watch, "OnShow", function() watch:Hide() end)
-  end
-
-  DEFAULT_CHAT_FRAME:AddMessage("|cffff00ffQuestLogDualWidth: 任务追踪框已隐藏|r")
-end
-
--- ============================================================
--- 入口
--- ============================================================
-
-local function Setup()
-  SetupDualWidth()
-  HideQuestWatch()
 end
 
 local bootstrap = CreateFrame("Frame")
 bootstrap:RegisterEvent("PLAYER_ENTERING_WORLD")
 bootstrap:SetScript("OnEvent", function()
   pcall(function() bootstrap:UnregisterEvent("PLAYER_ENTERING_WORLD") end)
-  pcall(Setup)
+  pcall(SetupDualWidth)
+  -- 如果你希望保留小地图下方的任务追踪框，请把下面这行前面的 "--" 去掉（取消注释）
+  -- HideQuestWatch()
 end)

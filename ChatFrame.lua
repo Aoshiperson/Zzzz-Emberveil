@@ -53,8 +53,8 @@ local function PositionChatFrame()
     return
   end
   ChatFrame1:ClearAllPoints()
-  ChatFrame1:SetPoint("BOTTOMLEFT", UIParent, "BOTTOMLEFT", 18, 40)
-  ChatFrame1:SetWidth(400)
+  ChatFrame1:SetPoint("BOTTOMLEFT", UIParent, "BOTTOMLEFT", 18, 30)
+  ChatFrame1:SetWidth(320)
   ChatFrame1:SetHeight(180)
 end
 

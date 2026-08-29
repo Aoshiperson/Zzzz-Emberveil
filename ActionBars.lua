@@ -21,8 +21,8 @@
 -- ============================================================
 
 local CONFIG = {
-  buttonSize    = 34,
-  buttonSpacing = 2,
+  buttonSize    = 30,
+  buttonSpacing = 0,
 
   showKeybind  = true,
   showMacro    = true,
@@ -32,10 +32,10 @@ local CONFIG = {
 
   bars = {
     [1] = { enabled = true,  point = "BOTTOM", x = 0,   y = 18,  label = "主条(跟随翻页)" },
-    [2] = { enabled = true,  point = "BOTTOM", x = 0,   y = 58,  label = "MultiBarRight"       },
+    [2] = { enabled = false,  point = "BOTTOM", x = 0,   y = 58,  label = "MultiBarRight"       },
     [3] = { enabled = false, point = "BOTTOM", x = 0,   y = 98,  label = "MultiBarLeft"        },
-    [4] = { enabled = true,  point = "BOTTOMRIGHT", x = -14, y = 18, label = "MultiBarBottomRight" },
-    [5] = { enabled = false, point = "BOTTOMLEFT",  x = 14,  y = 18, label = "MultiBarBottomLeft"  },
+    [4] = { enabled = false,  point = "BOTTOMRIGHT", x = -14, y = 18, label = "MultiBarBottomRight" },
+    [5] = { enabled = true, point = "BOTTOM",  x = 0,  y = 48, label = "MultiBarBottomLeft"  },
   },
 }
 
@@ -436,7 +436,7 @@ local function CreateBar(barIndex)
     buttons[i] = button
   end
 
-  frame:SetWidth(SLOTS_PER_BAR * (CONFIG.buttonSize + CONFIG.buttonSpacing))
+  frame:SetWidth(SLOTS_PER_BAR * CONFIG.buttonSize)
   frame:SetHeight(CONFIG.buttonSize)
 
   bars[barIndex] = { frame = frame, buttons = buttons }
