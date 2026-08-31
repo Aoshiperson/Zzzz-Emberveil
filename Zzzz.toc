@@ -2,8 +2,6 @@
 ## Title: Zzzz
 ## Notes: 动作条 + 背包按钮 + 聊天框样式 + 小地图 + 任务日志双宽/隐藏追踪框
 
-ActionBars.lua
-Bag.lua
 ChatFrame.lua
 MiniMap.lua
 Autorepair.lua
