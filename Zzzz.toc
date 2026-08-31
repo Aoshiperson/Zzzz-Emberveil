@@ -6,5 +6,4 @@ ActionBars.lua
 Bag.lua
 ChatFrame.lua
 MiniMap.lua
-# Questlog.lua
 Autorepair.lua
