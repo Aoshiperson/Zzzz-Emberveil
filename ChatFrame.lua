@@ -2,7 +2,7 @@
 -- Backdrop helpers
 -- =====================================================================
 
-local CHAT_FONT_SIZE = 10
+local CHAT_FONT_SIZE = 8
 
 -- Seamless backdrop for large surfaces (chat panels).
 -- UI-Tooltip-Background has a baked-in edge highlight, so tiling it across a
@@ -15,8 +15,8 @@ local function set_chat_backdrop(frame, r, g, b, a)
     edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
     tile = true,
     tileSize = 16,
-    edgeSize = 8,
-    insets = { left = 2, right = 2, top = 2, bottom = 2 },
+    edgeSize = 0,
+    insets = { left = 0, right = 0, top = 0, bottom = 0 },
   })
   frame:SetBackdropColor(r, g, b, a)
   frame:SetBackdropBorderColor(.25, .25, .25, 1)
@@ -55,7 +55,7 @@ local function PositionChatFrame()
   ChatFrame1:ClearAllPoints()
   ChatFrame1:SetPoint("BOTTOMLEFT", UIParent, "BOTTOMLEFT", 18, 30)
   ChatFrame1:SetWidth(320)
-  ChatFrame1:SetHeight(180)
+  ChatFrame1:SetHeight(160)
 end
 
 local function PositionChatEditBox()
@@ -66,7 +66,8 @@ local function PositionChatEditBox()
   ChatFrameEditBox:ClearAllPoints()
   ChatFrameEditBox:SetPoint("BOTTOMLEFT", ChatFrame1, "TOPLEFT", 0, 4)
   ChatFrameEditBox:SetPoint("BOTTOMRIGHT", ChatFrame1, "TOPRIGHT", 0, 4)
-  ChatFrameEditBox:SetHeight(22)
+  ChatFrameEditBox:SetHeight(20)
+  ChatFrameEditBox:SetFont("Fonts\\FRIZQT__.TTF", CHAT_FONT_SIZE)
 end
 
 local function ApplyChatFontSize()
