@@ -66,7 +66,9 @@ local function FormatMoney(amount)
   local gold = math.floor(amount / 10000)
   local silver = math.floor(math.mod(amount, 10000) / 100)
   local copper = math.mod(amount, 100)
-  return gold .. "|TInterface\\MoneyFrame\\UI-GoldIcon:12:12:2:0|t " .. silver .. "|TInterface\\MoneyFrame\\UI-SilverIcon:12:12:2:0|t " .. copper .. "|TInterface\\MoneyFrame\\UI-CopperIcon:12:12:2:0|t"
+  return gold .. "金 " .. silver .. "银 " .. copper .. "铜"
+end
+
 local function IsGreyItem(bag, slot)
   local linkOk, link = pcall(GetContainerItemLink, bag, slot)
   if not linkOk or type(link) ~= "string" or link == "" then
