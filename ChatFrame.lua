@@ -2,7 +2,7 @@
 -- Backdrop helpers
 -- =====================================================================
 
-local CHAT_FONT_SIZE = 8
+local CHAT_FONT_SIZE = 9
 
 -- Seamless backdrop for large surfaces (chat panels).
 -- UI-Tooltip-Background has a baked-in edge highlight, so tiling it across a
