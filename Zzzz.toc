@@ -5,3 +5,5 @@
 ChatFrame.lua
 MiniMap.lua
 Autorepair.lua
+Bagstogether.lua
+startattack.lua
