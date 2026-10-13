@@ -49,7 +49,8 @@ f:SetScript("OnEvent", function(a1, a2)
 	local ev = event or a2
 	if ev == "PLAYER_ENTER_COMBAT" then
 		autoAttack = true
-	elseif ev == "PLAYER_LEAVE_COMBAT" or ev == "PLAYER_TARGET_CHANGED" then
+	elseif ev == "PLAYER_LEAVE_COMBAT" then
+	--elseif ev == "PLAYER_LEAVE_COMBAT" or ev == "PLAYER_TARGET_CHANGED" then
 		autoAttack = false
 	elseif ev == "START_AUTOREPEAT_SPELL" then
 		autoShot = true
