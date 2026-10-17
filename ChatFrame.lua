@@ -70,6 +70,8 @@ local function PositionChatEditBox()
   ChatFrameEditBox:SetFont("Fonts\\FRIZQT__.TTF", CHAT_FONT_SIZE)
 end
 
+--  ClearFont 已实现 
+--[[
 local function ApplyChatFontSize()
   if not ChatFrame1 then
     DEFAULT_CHAT_FRAME:AddMessage("|cffff0000ChatFrame: ChatFrame1 not available|r")
@@ -78,16 +80,17 @@ local function ApplyChatFontSize()
   ChatFrame1:SetFont("Fonts\\FRIZQT__.TTF", CHAT_FONT_SIZE)
   SetChatWindowSize(1, CHAT_FONT_SIZE)
 end
+]]--
+
 local function StyleDefaultChatFrame()
   if not ChatFrame1 then
     DEFAULT_CHAT_FRAME:AddMessage("|cffff0000ChatFrame: ChatFrame1 not initialized yet|r")
     return
   end
   PositionChatFrame()
-  set_chat_backdrop(ChatFrame1)
+  set_chat_backdrop(ChatFrame1, .3, .3, .3, .5)
   HideChatTextures(1)
   PositionChatEditBox()
-  ApplyChatFontSize()
 end
 
 -- =====================================================================
